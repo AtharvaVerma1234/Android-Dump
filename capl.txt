@@ -1,0 +1,162 @@
+
+variables
+{
+  const byte kSD_FLAGS_DEFAULT            = 0xC0;
+
+  const byte kSD_ENTRY_FIND_SERVICE       = 0x00;
+  const byte kSD_ENTRY_OFFER_SERVICE      = 0x01;
+  const byte kSD_ENTRY_SUBSCRIBE_EVG      = 0x06;
+  const byte kSD_ENTRY_SUBSCRIBE_EVG_ACK  = 0x07;
+}
+
+dword GetHexStrByteLength(char hexStr[])
+{
+  long charLen;
+  charLen = strlen(hexStr);
+  if (charLen == 0) return 0;
+  return (dword)((charLen + 1) / 3);
+}
+
+void AppendHexBlock(char destBuf[], char newBlock[])
+{
+  if (strlen(newBlock) == 0) return;
+  if (strlen(destBuf) > 0)
+  {
+    strncat(destBuf, " ", elcount(destBuf) - strlen(destBuf) - 1);
+  }
+  strncat(destBuf, newBlock, elcount(destBuf) - strlen(destBuf) - 1);
+}
+
+// Wraps serialized entries with Flags (0xC0), Reserved (00 00 00), Entries Length, and Options Length (00 00 00 00)
+void BuildSomeIpSdPayload(char entriesArrayHex[], char outSdPayloadHex[])
+{
+  dword entriesByteLen;
+  entriesByteLen = GetHexStrByteLength(entriesArrayHex);
+
+  snprintf(outSdPayloadHex, elcount(outSdPayloadHex),
+           "%02X 00 00 00 %02X %02X %02X %02X %s 00 00 00 00",
+           kSD_FLAGS_DEFAULT,
+           (byte)((entriesByteLen >> 24) & 0xFF), (byte)((entriesByteLen >> 16) & 0xFF),
+           (byte)((entriesByteLen >> 8) & 0xFF),  (byte)(entriesByteLen & 0xFF),
+           entriesArrayHex);
+}
+
+
+variables
+{
+  struct SdEntry
+  {
+    // Common 12 Bytes
+    byte  entryType;
+    byte  idx1stOpt;
+    byte  idx2ndOpt;
+    byte  numOpt1;
+    byte  numOpt2;
+    word  serviceId;
+    word  instanceId;
+    byte  majorVersion;
+    dword ttl;
+
+    // Service Entry Specific (Bytes 12-15)
+    dword minorVersion;
+
+    // Eventgroup Entry Specific (Bytes 12-15)
+    byte  initialDataFlag;
+    byte  counter;
+    word  eventgroupId;
+  };
+}
+
+// --- "Constructors" ---
+
+void InitServiceEntry(struct SdEntry e, byte type, word srvId, word instId, byte majVer, dword ttl, dword minVer)
+{
+  e.entryType    = type;
+  e.idx1stOpt    = 0;
+  e.idx2ndOpt    = 0;
+  e.numOpt1      = 0;
+  e.numOpt2      = 0;
+  e.serviceId    = srvId;
+  e.instanceId   = instId;
+  e.majorVersion = majVer;
+  e.ttl          = ttl;
+  e.minorVersion = minVer;
+}
+
+void InitEventgroupEntry(struct SdEntry e, byte type, word srvId, word instId, byte majVer, dword ttl, byte initFlag, byte cnt, word evgId)
+{
+  e.entryType       = type;
+  e.idx1stOpt       = 0;
+  e.idx2ndOpt       = 0;
+  e.numOpt1         = 0;
+  e.numOpt2         = 0;
+  e.serviceId       = srvId;
+  e.instanceId      = instId;
+  e.majorVersion    = majVer;
+  e.ttl             = ttl;
+  e.initialDataFlag = initFlag;
+  e.counter         = cnt;
+  e.eventgroupId    = evgId;
+}
+
+// --- Unified Serializer (Dispatches based on entryType) ---
+
+void SerializeSdEntry(struct SdEntry e, char outHex[])
+{
+  char baseHex[64];
+  byte numOpts;
+  byte byte13;
+
+  numOpts = ((e.numOpt1 & 0x0F) << 4) | (e.numOpt2 & 0x0F);
+
+  snprintf(baseHex, elcount(baseHex),
+           "%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+           e.entryType, e.idx1stOpt, e.idx2ndOpt, numOpts,
+           (byte)((e.serviceId >> 8) & 0xFF),  (byte)(e.serviceId & 0xFF),
+           (byte)((e.instanceId >> 8) & 0xFF), (byte)(e.instanceId & 0xFF),
+           e.majorVersion,
+           (byte)((e.ttl >> 16) & 0xFF), (byte)((e.ttl >> 8) & 0xFF), (byte)(e.ttl & 0xFF));
+
+  if (e.entryType == kSD_ENTRY_FIND_SERVICE || e.entryType == kSD_ENTRY_OFFER_SERVICE)
+  {
+    snprintf(outHex, elcount(outHex), "%s %02X %02X %02X %02X",
+             baseHex,
+             (byte)((e.minorVersion >> 24) & 0xFF), (byte)((e.minorVersion >> 16) & 0xFF),
+             (byte)((e.minorVersion >> 8) & 0xFF),  (byte)(e.minorVersion & 0xFF));
+  }
+  else
+  {
+    byte13 = ((e.initialDataFlag & 0x01) << 7) | (e.counter & 0x0F);
+    snprintf(outHex, elcount(outHex), "%s 00 %02X %02X %02X",
+             baseHex, byte13,
+             (byte)((e.eventgroupId >> 8) & 0xFF), (byte)(e.eventgroupId & 0xFF));
+  }
+}
+
+void SerializeSdEntryArray(struct SdEntry arr[], int count, char ioEntriesHex[])
+{
+  int i;
+  char singleHex[64];
+  for (i = 0; i < count; i++)
+  {
+    SerializeSdEntry(arr[i], singleHex);
+    AppendHexBlock(ioEntriesHex, singleHex);
+  }
+}
+
+// --- Usage Example (Version 2) ---
+void ExampleVersion2()
+{
+  struct SdEntry entries[2];
+  char entriesHex[512];
+  char sdPayload[1024];
+
+  entriesHex[0] = '\0';
+
+  // Can freely mix Find/Offer and Subscribe in the same array
+  InitEventgroupEntry(entries[0], kSD_ENTRY_SUBSCRIBE_EVG, 0x1234, 0x0001, 0x01, 0x00000A, 0, 0, 0x0001);
+  InitServiceEntry(entries[1],    kSD_ENTRY_FIND_SERVICE,  0x5678, 0xFFFF, 0xFF, 0xFFFFFF, 0xFFFFFFFF);
+
+  SerializeSdEntryArray(entries, 2, entriesHex);
+  BuildSomeIpSdPayload(entriesHex, sdPayload);
+}
