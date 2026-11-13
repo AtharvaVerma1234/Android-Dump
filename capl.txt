@@ -1,162 +1,206 @@
+// -------------------------------------------------------------------------
+// Big-Endian Helpers for Reading UDP Payload Bytes from ethernetPacket*
+// -------------------------------------------------------------------------
 
-variables
+word ReadUdpBeWord(ethernetPacket* pckt, dword offset)
 {
-  const byte kSD_FLAGS_DEFAULT            = 0xC0;
-
-  const byte kSD_ENTRY_FIND_SERVICE       = 0x00;
-  const byte kSD_ENTRY_OFFER_SERVICE      = 0x01;
-  const byte kSD_ENTRY_SUBSCRIBE_EVG      = 0x06;
-  const byte kSD_ENTRY_SUBSCRIBE_EVG_ACK  = 0x07;
+  return ((word)pckt.udp.byte(offset) << 8) | (word)pckt.udp.byte(offset + 1);
 }
 
-dword GetHexStrByteLength(char hexStr[])
+dword ReadUdpBe24(ethernetPacket* pckt, dword offset)
 {
-  long charLen;
-  charLen = strlen(hexStr);
-  if (charLen == 0) return 0;
-  return (dword)((charLen + 1) / 3);
+  return ((dword)pckt.udp.byte(offset)     << 16) |
+         ((dword)pckt.udp.byte(offset + 1) << 8)  |
+          (dword)pckt.udp.byte(offset + 2);
 }
 
-void AppendHexBlock(char destBuf[], char newBlock[])
+dword ReadUdpBeDWord(ethernetPacket* pckt, dword offset)
 {
-  if (strlen(newBlock) == 0) return;
-  if (strlen(destBuf) > 0)
+  return ((dword)pckt.udp.byte(offset)     << 24) |
+         ((dword)pckt.udp.byte(offset + 1) << 16) |
+         ((dword)pckt.udp.byte(offset + 2) << 8)  |
+          (dword)pckt.udp.byte(offset + 3);
+}
+
+// -------------------------------------------------------------------------
+// Main SOME/IP-SD Packet Printer
+// -------------------------------------------------------------------------
+
+void print_sd_packet_details(ethernetPacket* pckt)
+{
+  dword udpPayloadLen;
+  word  serviceId;
+  word  methodId;
+  word  clientId;
+  word  sessionId;
+  byte  flags;
+  byte  rebootFlag;
+  byte  unicastFlag;
+
+  dword entriesLen;
+  dword entriesEnd;
+  dword offset;
+  int   entryIdx;
+
+  byte  entryType;
+  byte  idx1stOpt;
+  byte  idx2ndOpt;
+  byte  numOpt1;
+  byte  numOpt2;
+  word  eSrvId;
+  word  eInstId;
+  byte  eMajVer;
+  dword eTtl;
+  dword eMinVer;
+  byte  b13;
+  byte  initFlag;
+  byte  counter;
+  word  evgId;
+  char  typeLabel[32];
+
+  dword optionsLen;
+  dword optOffset;
+  dword optionsEnd;
+  int   optIdx;
+  word  optLen;
+  byte  optType;
+  dword totalOptBytes;
+  byte  l4Proto;
+  word  portNum;
+
+  if (pckt == null || !pckt.udp.IsAvailable())
   {
-    strncat(destBuf, " ", elcount(destBuf) - strlen(destBuf) - 1);
+    write("[SOME/IP-SD] Invalid or non-UDP packet.");
+    return;
   }
-  strncat(destBuf, newBlock, elcount(destBuf) - strlen(destBuf) - 1);
-}
 
-// Wraps serialized entries with Flags (0xC0), Reserved (00 00 00), Entries Length, and Options Length (00 00 00 00)
-void BuildSomeIpSdPayload(char entriesArrayHex[], char outSdPayloadHex[])
-{
-  dword entriesByteLen;
-  entriesByteLen = GetHexStrByteLength(entriesArrayHex);
-
-  snprintf(outSdPayloadHex, elcount(outSdPayloadHex),
-           "%02X 00 00 00 %02X %02X %02X %02X %s 00 00 00 00",
-           kSD_FLAGS_DEFAULT,
-           (byte)((entriesByteLen >> 24) & 0xFF), (byte)((entriesByteLen >> 16) & 0xFF),
-           (byte)((entriesByteLen >> 8) & 0xFF),  (byte)(entriesByteLen & 0xFF),
-           entriesArrayHex);
-}
-
-
-variables
-{
-  struct SdEntry
+  udpPayloadLen = pckt.udp.Length - 8;
+  if (udpPayloadLen < 28) // 16B SOME/IP Header + 4B SD Header + 4B EntriesLen + 4B OptionsLen
   {
-    // Common 12 Bytes
-    byte  entryType;
-    byte  idx1stOpt;
-    byte  idx2ndOpt;
-    byte  numOpt1;
-    byte  numOpt2;
-    word  serviceId;
-    word  instanceId;
-    byte  majorVersion;
-    dword ttl;
+    write("[SOME/IP-SD] Packet too short (%d bytes).", udpPayloadLen);
+    return;
+  }
 
-    // Service Entry Specific (Bytes 12-15)
-    dword minorVersion;
+  serviceId = ReadUdpBeWord(pckt, 0);
+  methodId  = ReadUdpBeWord(pckt, 2);
 
-    // Eventgroup Entry Specific (Bytes 12-15)
-    byte  initialDataFlag;
-    byte  counter;
-    word  eventgroupId;
-  };
-}
-
-// --- "Constructors" ---
-
-void InitServiceEntry(struct SdEntry e, byte type, word srvId, word instId, byte majVer, dword ttl, dword minVer)
-{
-  e.entryType    = type;
-  e.idx1stOpt    = 0;
-  e.idx2ndOpt    = 0;
-  e.numOpt1      = 0;
-  e.numOpt2      = 0;
-  e.serviceId    = srvId;
-  e.instanceId   = instId;
-  e.majorVersion = majVer;
-  e.ttl          = ttl;
-  e.minorVersion = minVer;
-}
-
-void InitEventgroupEntry(struct SdEntry e, byte type, word srvId, word instId, byte majVer, dword ttl, byte initFlag, byte cnt, word evgId)
-{
-  e.entryType       = type;
-  e.idx1stOpt       = 0;
-  e.idx2ndOpt       = 0;
-  e.numOpt1         = 0;
-  e.numOpt2         = 0;
-  e.serviceId       = srvId;
-  e.instanceId      = instId;
-  e.majorVersion    = majVer;
-  e.ttl             = ttl;
-  e.initialDataFlag = initFlag;
-  e.counter         = cnt;
-  e.eventgroupId    = evgId;
-}
-
-// --- Unified Serializer (Dispatches based on entryType) ---
-
-void SerializeSdEntry(struct SdEntry e, char outHex[])
-{
-  char baseHex[64];
-  byte numOpts;
-  byte byte13;
-
-  numOpts = ((e.numOpt1 & 0x0F) << 4) | (e.numOpt2 & 0x0F);
-
-  snprintf(baseHex, elcount(baseHex),
-           "%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-           e.entryType, e.idx1stOpt, e.idx2ndOpt, numOpts,
-           (byte)((e.serviceId >> 8) & 0xFF),  (byte)(e.serviceId & 0xFF),
-           (byte)((e.instanceId >> 8) & 0xFF), (byte)(e.instanceId & 0xFF),
-           e.majorVersion,
-           (byte)((e.ttl >> 16) & 0xFF), (byte)((e.ttl >> 8) & 0xFF), (byte)(e.ttl & 0xFF));
-
-  if (e.entryType == kSD_ENTRY_FIND_SERVICE || e.entryType == kSD_ENTRY_OFFER_SERVICE)
+  if (serviceId != 0xFFFF || methodId != 0x8100)
   {
-    snprintf(outHex, elcount(outHex), "%s %02X %02X %02X %02X",
-             baseHex,
-             (byte)((e.minorVersion >> 24) & 0xFF), (byte)((e.minorVersion >> 16) & 0xFF),
-             (byte)((e.minorVersion >> 8) & 0xFF),  (byte)(e.minorVersion & 0xFF));
+    write("[SOME/IP-SD] Not an SD packet (ServiceID=0x%04X, MethodID=0x%04X).", serviceId, methodId);
+    return;
+  }
+
+  clientId    = ReadUdpBeWord(pckt, 8);
+  sessionId   = ReadUdpBeWord(pckt, 10);
+  flags       = pckt.udp.byte(16);
+  rebootFlag  = (flags >> 7) & 0x01;
+  unicastFlag = (flags >> 6) & 0x01;
+  entriesLen  = ReadUdpBeDWord(pckt, 20);
+  entriesEnd  = 24 + entriesLen;
+
+  if (entriesEnd + 4 > udpPayloadLen)
+  {
+    write("[SOME/IP-SD] Malformed packet: EntriesLength (%u) exceeds payload.", entriesLen);
+    return;
+  }
+
+  write("================ SOME/IP-SD PACKET ================");
+  write("Header  | ClientID: 0x%04X | SessionID: 0x%04X | Flags: 0x%02X (Reboot=%d, Unicast=%d)",
+        clientId, sessionId, flags, rebootFlag, unicastFlag);
+  write("Lengths | Entries: %u bytes (%u entries) | UDP Payload: %u bytes",
+        entriesLen, entriesLen / 16, udpPayloadLen);
+
+  // --- Parse Entries Array ---
+  offset   = 24;
+  entryIdx = 0;
+
+  while (offset + 16 <= entriesEnd)
+  {
+    entryType = pckt.udp.byte(offset);
+    idx1stOpt = pckt.udp.byte(offset + 1);
+    idx2ndOpt = pckt.udp.byte(offset + 2);
+    numOpt1   = (pckt.udp.byte(offset + 3) >> 4) & 0x0F;
+    numOpt2   = pckt.udp.byte(offset + 3) & 0x0F;
+    eSrvId    = ReadUdpBeWord(pckt, offset + 4);
+    eInstId   = ReadUdpBeWord(pckt, offset + 6);
+    eMajVer   = pckt.udp.byte(offset + 8);
+    eTtl      = ReadUdpBe24(pckt, offset + 9);
+
+    switch (entryType)
+    {
+      case 0x00: snprintf(typeLabel, elcount(typeLabel), "FindService"); break;
+      case 0x01: snprintf(typeLabel, elcount(typeLabel), (eTtl == 0) ? "StopOfferService" : "OfferService"); break;
+      case 0x06: snprintf(typeLabel, elcount(typeLabel), (eTtl == 0) ? "StopSubscribeEvg" : "SubscribeEventgroup"); break;
+      case 0x07: snprintf(typeLabel, elcount(typeLabel), (eTtl == 0) ? "SubscribeEvgNack"  : "SubscribeEventgroupAck"); break;
+      default:   snprintf(typeLabel, elcount(typeLabel), "Unknown(0x%02X)", entryType); break;
+    }
+
+    if (entryType == 0x00 || entryType == 0x01)
+    {
+      eMinVer = ReadUdpBeDWord(pckt, offset + 12);
+      write("  Entry[%d] %-22s | Srv: 0x%04X | Inst: 0x%04X | Ver: %u.%u | TTL: %u s | Opts: [Idx:%u,%u Num:%u,%u]",
+            entryIdx, typeLabel, eSrvId, eInstId, eMajVer, eMinVer, eTtl, idx1stOpt, idx2ndOpt, numOpt1, numOpt2);
+    }
+    else
+    {
+      b13      = pckt.udp.byte(offset + 13);
+      initFlag = (b13 >> 7) & 0x01;
+      counter  = b13 & 0x0F;
+      evgId    = ReadUdpBeWord(pckt, offset + 14);
+      write("  Entry[%d] %-22s | Srv: 0x%04X | Inst: 0x%04X | EvgID: 0x%04X | MajVer: %u | TTL: %u s | InitReq: %u | Cnt: %u | Opts: [Idx:%u,%u Num:%u,%u]",
+            entryIdx, typeLabel, eSrvId, eInstId, evgId, eMajVer, eTtl, initFlag, counter, idx1stOpt, idx2ndOpt, numOpt1, numOpt2);
+    }
+
+    offset += 16;
+    entryIdx++;
+  }
+
+  // --- Parse Options Array (if present) ---
+  optionsLen = ReadUdpBeDWord(pckt, entriesEnd);
+  optOffset  = entriesEnd + 4;
+  optionsEnd = optOffset + optionsLen;
+  optIdx     = 0;
+
+  if (optionsLen == 0)
+  {
+    write("Options | None (0 bytes)");
+  }
+  else if (optionsEnd > udpPayloadLen)
+  {
+    write("[SOME/IP-SD] Malformed packet: OptionsLength (%u) exceeds payload.", optionsLen);
   }
   else
   {
-    byte13 = ((e.initialDataFlag & 0x01) << 7) | (e.counter & 0x0F);
-    snprintf(outHex, elcount(outHex), "%s 00 %02X %02X %02X",
-             baseHex, byte13,
-             (byte)((e.eventgroupId >> 8) & 0xFF), (byte)(e.eventgroupId & 0xFF));
+    write("Options | %u bytes:", optionsLen);
+    while (optOffset + 3 <= optionsEnd)
+    {
+      optLen        = ReadUdpBeWord(pckt, optOffset);
+      optType       = pckt.udp.byte(optOffset + 2);
+      totalOptBytes = 3 + optLen; // AUTOSAR Option Length excludes Length(2B) + Type(1B)
+
+      if (optOffset + totalOptBytes > optionsEnd) break;
+
+      if ((optType == 0x04 || optType == 0x14) && optLen == 0x0009)
+      {
+        l4Proto = pckt.udp.byte(optOffset + 9);
+        portNum = ReadUdpBeWord(pckt, optOffset + 10);
+        write("  Option[%d] %-14s | IP: %u.%u.%u.%u | Proto: %s (0x%02X) | Port: %u",
+              optIdx,
+              (optType == 0x04) ? "IPv4 Endpoint" : "IPv4 Multicast",
+              pckt.udp.byte(optOffset + 4), pckt.udp.byte(optOffset + 5),
+              pckt.udp.byte(optOffset + 6), pckt.udp.byte(optOffset + 7),
+              (l4Proto == 0x11) ? "UDP" : ((l4Proto == 0x06) ? "TCP" : "OTHER"),
+              l4Proto, portNum);
+      }
+      else
+      {
+        write("  Option[%d] Type: 0x%02X | Length: %u bytes", optIdx, optType, optLen);
+      }
+
+      optOffset += totalOptBytes;
+      optIdx++;
+    }
   }
-}
 
-void SerializeSdEntryArray(struct SdEntry arr[], int count, char ioEntriesHex[])
-{
-  int i;
-  char singleHex[64];
-  for (i = 0; i < count; i++)
-  {
-    SerializeSdEntry(arr[i], singleHex);
-    AppendHexBlock(ioEntriesHex, singleHex);
-  }
-}
-
-// --- Usage Example (Version 2) ---
-void ExampleVersion2()
-{
-  struct SdEntry entries[2];
-  char entriesHex[512];
-  char sdPayload[1024];
-
-  entriesHex[0] = '\0';
-
-  // Can freely mix Find/Offer and Subscribe in the same array
-  InitEventgroupEntry(entries[0], kSD_ENTRY_SUBSCRIBE_EVG, 0x1234, 0x0001, 0x01, 0x00000A, 0, 0, 0x0001);
-  InitServiceEntry(entries[1],    kSD_ENTRY_FIND_SERVICE,  0x5678, 0xFFFF, 0xFF, 0xFFFFFF, 0xFFFFFFFF);
-
-  SerializeSdEntryArray(entries, 2, entriesHex);
-  BuildSomeIpSdPayload(entriesHex, sdPayload);
+  write("===================================================");
 }
