@@ -1,38 +1,47 @@
 // -------------------------------------------------------------------------
-// Big-Endian Helpers for Reading UDP Payload Bytes from ethernetPacket*
+// Big-Endian Byte Array Readers
 // -------------------------------------------------------------------------
 
-word ReadUdpBeWord(ethernetPacket* pckt, dword offset)
+word ReadBeWord(byte data[], dword offset)
 {
-  return ((word)pckt.udp.byte(offset) << 8) | (word)pckt.udp.byte(offset + 1);
+  return ((word)data[offset] << 8) | (word)data[offset + 1];
 }
 
-dword ReadUdpBe24(ethernetPacket* pckt, dword offset)
+dword ReadBe24(byte data[], dword offset)
 {
-  return ((dword)pckt.udp.byte(offset)     << 16) |
-         ((dword)pckt.udp.byte(offset + 1) << 8)  |
-          (dword)pckt.udp.byte(offset + 2);
+  return ((dword)data[offset]     << 16) |
+         ((dword)data[offset + 1] << 8)  |
+          (dword)data[offset + 2];
 }
 
-dword ReadUdpBeDWord(ethernetPacket* pckt, dword offset)
+dword ReadBeDWord(byte data[], dword offset)
 {
-  return ((dword)pckt.udp.byte(offset)     << 24) |
-         ((dword)pckt.udp.byte(offset + 1) << 16) |
-         ((dword)pckt.udp.byte(offset + 2) << 8)  |
-          (dword)pckt.udp.byte(offset + 3);
+  return ((dword)data[offset]     << 24) |
+         ((dword)data[offset + 1] << 16) |
+         ((dword)data[offset + 2] << 8)  |
+          (dword)data[offset + 3];
 }
 
 // -------------------------------------------------------------------------
-// Main SOME/IP-SD Packet Printer
+// SOME/IP-SD Packet Printer (Strict CAPL Syntax)
 // -------------------------------------------------------------------------
 
 void print_sd_packet_details(ethernetPacket* pckt)
 {
-  dword udpPayloadLen;
+  // All local variables declared at the top of the function (CAPL requirement)
+  byte  udpData[1500];
+  word  udpPayloadLen;
+
   word  serviceId;
   word  methodId;
+  dword someIpLen;
   word  clientId;
   word  sessionId;
+  byte  protoVer;
+  byte  ifaceVer;
+  byte  msgType;
+  byte  retCode;
+
   byte  flags;
   byte  rebootFlag;
   byte  unicastFlag;
@@ -67,22 +76,28 @@ void print_sd_packet_details(ethernetPacket* pckt)
   dword totalOptBytes;
   byte  l4Proto;
   word  portNum;
+  char  optTypeLabel[24];
+  char  protoLabel[12];
 
-  if (pckt == null || !pckt.udp.IsAvailable())
+  // 1. Verify UDP protocol layer is present in the Ethernet packet
+  if (!pckt.udp.IsAvailable())
   {
-    write("[SOME/IP-SD] Invalid or non-UDP packet.");
+    write("[SOME/IP-SD] Packet does not contain a UDP header.");
     return;
   }
 
-  udpPayloadLen = pckt.udp.Length - 8;
-  if (udpPayloadLen < 28) // 16B SOME/IP Header + 4B SD Header + 4B EntriesLen + 4B OptionsLen
+  // 2. Copy UDP payload bytes into local buffer using Vector Ethernet API
+  udpPayloadLen = pckt.udp.GetData(0, udpData, elcount(udpData));
+
+  if (udpPayloadLen < 28) // 16B SOME/IP Hdr + 4B SD Hdr + 4B EntriesLen + 4B OptionsLen
   {
-    write("[SOME/IP-SD] Packet too short (%d bytes).", udpPayloadLen);
+    write("[SOME/IP-SD] UDP payload too short for SOME/IP-SD (%d bytes).", udpPayloadLen);
     return;
   }
 
-  serviceId = ReadUdpBeWord(pckt, 0);
-  methodId  = ReadUdpBeWord(pckt, 2);
+  // 3. Validate SOME/IP-SD Service ID (0xFFFF) and Method ID (0x8100)
+  serviceId = ReadBeWord(udpData, 0);
+  methodId  = ReadBeWord(udpData, 2);
 
   if (serviceId != 0xFFFF || methodId != 0x8100)
   {
@@ -90,73 +105,98 @@ void print_sd_packet_details(ethernetPacket* pckt)
     return;
   }
 
-  clientId    = ReadUdpBeWord(pckt, 8);
-  sessionId   = ReadUdpBeWord(pckt, 10);
-  flags       = pckt.udp.byte(16);
+  // 4. Parse SOME/IP & SD Header fields
+  someIpLen   = ReadBeDWord(udpData, 4);
+  clientId    = ReadBeWord(udpData, 8);
+  sessionId   = ReadBeWord(udpData, 10);
+  protoVer    = udpData[12];
+  ifaceVer    = udpData[13];
+  msgType     = udpData[14];
+  retCode     = udpData[15];
+
+  flags       = udpData[16];
   rebootFlag  = (flags >> 7) & 0x01;
   unicastFlag = (flags >> 6) & 0x01;
-  entriesLen  = ReadUdpBeDWord(pckt, 20);
+  entriesLen  = ReadBeDWord(udpData, 20);
   entriesEnd  = 24 + entriesLen;
 
-  if (entriesEnd + 4 > udpPayloadLen)
+  if (entriesEnd + 4 > (dword)udpPayloadLen)
   {
-    write("[SOME/IP-SD] Malformed packet: EntriesLength (%u) exceeds payload.", entriesLen);
+    write("[SOME/IP-SD] Malformed packet: EntriesLength (%u) exceeds UDP payload (%d).", entriesLen, udpPayloadLen);
     return;
   }
 
   write("================ SOME/IP-SD PACKET ================");
-  write("Header  | ClientID: 0x%04X | SessionID: 0x%04X | Flags: 0x%02X (Reboot=%d, Unicast=%d)",
-        clientId, sessionId, flags, rebootFlag, unicastFlag);
-  write("Lengths | Entries: %u bytes (%u entries) | UDP Payload: %u bytes",
-        entriesLen, entriesLen / 16, udpPayloadLen);
+  write("SOME/IP | Len: %u | ClientID: 0x%04X | SessionID: 0x%04X | Ver: %d.%d | MsgType: 0x%02X | RetCode: 0x%02X",
+        someIpLen, clientId, sessionId, protoVer, ifaceVer, msgType, retCode);
+  write("SD Hdr  | Flags: 0x%02X (Reboot=%d, Unicast=%d) | EntriesLen: %u bytes (%u entries)",
+        flags, rebootFlag, unicastFlag, entriesLen, entriesLen / 16);
 
-  // --- Parse Entries Array ---
+  // 5. Parse Entries Array
   offset   = 24;
   entryIdx = 0;
 
   while (offset + 16 <= entriesEnd)
   {
-    entryType = pckt.udp.byte(offset);
-    idx1stOpt = pckt.udp.byte(offset + 1);
-    idx2ndOpt = pckt.udp.byte(offset + 2);
-    numOpt1   = (pckt.udp.byte(offset + 3) >> 4) & 0x0F;
-    numOpt2   = pckt.udp.byte(offset + 3) & 0x0F;
-    eSrvId    = ReadUdpBeWord(pckt, offset + 4);
-    eInstId   = ReadUdpBeWord(pckt, offset + 6);
-    eMajVer   = pckt.udp.byte(offset + 8);
-    eTtl      = ReadUdpBe24(pckt, offset + 9);
+    entryType = udpData[offset];
+    idx1stOpt = udpData[offset + 1];
+    idx2ndOpt = udpData[offset + 2];
+    numOpt1   = (udpData[offset + 3] >> 4) & 0x0F;
+    numOpt2   = udpData[offset + 3] & 0x0F;
+    eSrvId    = ReadBeWord(udpData, offset + 4);
+    eInstId   = ReadBeWord(udpData, offset + 6);
+    eMajVer   = udpData[offset + 8];
+    eTtl      = ReadBe24(udpData, offset + 9);
 
+    // Avoid string literals inside ternary ?: operators (invalid in CAPL)
     switch (entryType)
     {
-      case 0x00: snprintf(typeLabel, elcount(typeLabel), "FindService"); break;
-      case 0x01: snprintf(typeLabel, elcount(typeLabel), (eTtl == 0) ? "StopOfferService" : "OfferService"); break;
-      case 0x06: snprintf(typeLabel, elcount(typeLabel), (eTtl == 0) ? "StopSubscribeEvg" : "SubscribeEventgroup"); break;
-      case 0x07: snprintf(typeLabel, elcount(typeLabel), (eTtl == 0) ? "SubscribeEvgNack"  : "SubscribeEventgroupAck"); break;
-      default:   snprintf(typeLabel, elcount(typeLabel), "Unknown(0x%02X)", entryType); break;
+      case 0x00:
+        strncpy(typeLabel, "FindService", elcount(typeLabel));
+        break;
+      case 0x01:
+        if (eTtl == 0) strncpy(typeLabel, "StopOfferService", elcount(typeLabel));
+        else           strncpy(typeLabel, "OfferService", elcount(typeLabel));
+        break;
+      case 0x06:
+        if (eTtl == 0) strncpy(typeLabel, "StopSubscribeEvg", elcount(typeLabel));
+        else           strncpy(typeLabel, "SubscribeEventgroup", elcount(typeLabel));
+        break;
+      case 0x07:
+        if (eTtl == 0) strncpy(typeLabel, "SubscribeEvgNack", elcount(typeLabel));
+        else           strncpy(typeLabel, "SubscribeEventgroupAck", elcount(typeLabel));
+        break;
+      default:
+        snprintf(typeLabel, elcount(typeLabel), "Unknown(0x%02X)", entryType);
+        break;
     }
 
     if (entryType == 0x00 || entryType == 0x01)
     {
-      eMinVer = ReadUdpBeDWord(pckt, offset + 12);
-      write("  Entry[%d] %-22s | Srv: 0x%04X | Inst: 0x%04X | Ver: %u.%u | TTL: %u s | Opts: [Idx:%u,%u Num:%u,%u]",
-            entryIdx, typeLabel, eSrvId, eInstId, eMajVer, eMinVer, eTtl, idx1stOpt, idx2ndOpt, numOpt1, numOpt2);
+      eMinVer = ReadBeDWord(udpData, offset + 12);
+      write("  Entry[%d] %s | Srv: 0x%04X | Inst: 0x%04X | MajVer: %d | MinVer: %u | TTL: %u s",
+            entryIdx, typeLabel, eSrvId, eInstId, eMajVer, eMinVer, eTtl);
+      write("           Options -> 1stIdx: %d (Count: %d), 2ndIdx: %d (Count: %d)",
+            idx1stOpt, numOpt1, idx2ndOpt, numOpt2);
     }
     else
     {
-      b13      = pckt.udp.byte(offset + 13);
+      b13      = udpData[offset + 13];
       initFlag = (b13 >> 7) & 0x01;
       counter  = b13 & 0x0F;
-      evgId    = ReadUdpBeWord(pckt, offset + 14);
-      write("  Entry[%d] %-22s | Srv: 0x%04X | Inst: 0x%04X | EvgID: 0x%04X | MajVer: %u | TTL: %u s | InitReq: %u | Cnt: %u | Opts: [Idx:%u,%u Num:%u,%u]",
-            entryIdx, typeLabel, eSrvId, eInstId, evgId, eMajVer, eTtl, initFlag, counter, idx1stOpt, idx2ndOpt, numOpt1, numOpt2);
+      evgId    = ReadBeWord(udpData, offset + 14);
+      write("  Entry[%d] %s | Srv: 0x%04X | Inst: 0x%04X | EvgID: 0x%04X | MajVer: %d | TTL: %u s",
+            entryIdx, typeLabel, eSrvId, eInstId, evgId, eMajVer, eTtl);
+      write("           InitDataReq: %d | Counter: %d | Options -> 1stIdx: %d (Count: %d), 2ndIdx: %d (Count: %d)",
+            initFlag, counter, idx1stOpt, numOpt1, idx2ndOpt, numOpt2);
     }
 
     offset += 16;
     entryIdx++;
   }
 
-  // --- Parse Options Array (if present) ---
-  optionsLen = ReadUdpBeDWord(pckt, entriesEnd);
+  // 6. Parse Options Array
+  optionsLen = ReadBeDWord(udpData, entriesEnd);
   optOffset  = entriesEnd + 4;
   optionsEnd = optOffset + optionsLen;
   optIdx     = 0;
@@ -165,36 +205,42 @@ void print_sd_packet_details(ethernetPacket* pckt)
   {
     write("Options | None (0 bytes)");
   }
-  else if (optionsEnd > udpPayloadLen)
+  else if (optionsEnd > (dword)udpPayloadLen)
   {
-    write("[SOME/IP-SD] Malformed packet: OptionsLength (%u) exceeds payload.", optionsLen);
+    write("[SOME/IP-SD] Malformed packet: OptionsLength (%u) exceeds UDP payload.", optionsLen);
   }
   else
   {
     write("Options | %u bytes:", optionsLen);
     while (optOffset + 3 <= optionsEnd)
     {
-      optLen        = ReadUdpBeWord(pckt, optOffset);
-      optType       = pckt.udp.byte(optOffset + 2);
-      totalOptBytes = 3 + optLen; // AUTOSAR Option Length excludes Length(2B) + Type(1B)
+      optLen        = ReadBeWord(udpData, optOffset);
+      optType       = udpData[optOffset + 2];
+      totalOptBytes = 3 + (dword)optLen;
 
       if (optOffset + totalOptBytes > optionsEnd) break;
 
       if ((optType == 0x04 || optType == 0x14) && optLen == 0x0009)
       {
-        l4Proto = pckt.udp.byte(optOffset + 9);
-        portNum = ReadUdpBeWord(pckt, optOffset + 10);
-        write("  Option[%d] %-14s | IP: %u.%u.%u.%u | Proto: %s (0x%02X) | Port: %u",
-              optIdx,
-              (optType == 0x04) ? "IPv4 Endpoint" : "IPv4 Multicast",
-              pckt.udp.byte(optOffset + 4), pckt.udp.byte(optOffset + 5),
-              pckt.udp.byte(optOffset + 6), pckt.udp.byte(optOffset + 7),
-              (l4Proto == 0x11) ? "UDP" : ((l4Proto == 0x06) ? "TCP" : "OTHER"),
-              l4Proto, portNum);
+        l4Proto = udpData[optOffset + 9];
+        portNum = ReadBeWord(udpData, optOffset + 10);
+
+        if (optType == 0x04) strncpy(optTypeLabel, "IPv4 Endpoint", elcount(optTypeLabel));
+        else                 strncpy(optTypeLabel, "IPv4 Multicast", elcount(optTypeLabel));
+
+        if (l4Proto == 0x11)      strncpy(protoLabel, "UDP", elcount(protoLabel));
+        else if (l4Proto == 0x06) strncpy(protoLabel, "TCP", elcount(protoLabel));
+        else                      strncpy(protoLabel, "OTHER", elcount(protoLabel));
+
+        write("  Option[%d] %s | IP: %d.%d.%d.%d | Proto: %s (0x%02X) | Port: %d",
+              optIdx, optTypeLabel,
+              udpData[optOffset + 4], udpData[optOffset + 5],
+              udpData[optOffset + 6], udpData[optOffset + 7],
+              protoLabel, l4Proto, portNum);
       }
       else
       {
-        write("  Option[%d] Type: 0x%02X | Length: %u bytes", optIdx, optType, optLen);
+        write("  Option[%d] Type: 0x%02X | Length: %d bytes", optIdx, optType, optLen);
       }
 
       optOffset += totalOptBytes;
